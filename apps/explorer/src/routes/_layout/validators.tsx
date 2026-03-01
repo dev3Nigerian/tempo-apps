@@ -8,6 +8,7 @@ import { Sections } from '#comps/Sections'
 import { useMediaQuery } from '#lib/hooks'
 import { withLoaderTiming } from '#lib/profiling'
 import { validatorsQueryOptions } from '#lib/queries'
+import type { Validator } from '#lib/queries'
 import Check from '~icons/lucide/check'
 import X from '~icons/lucide/x'
 
@@ -18,6 +19,36 @@ function ValidatorName({ name }: { name?: string }) {
 			{name}
 		</span>
 	)
+}
+
+type ValidatorStatus = {
+	icon: React.ReactNode
+	label: string
+	className: string
+}
+
+function validatorStatus(validator: Validator): ValidatorStatus {
+	if (validator.active) {
+		return {
+			icon: <Check className="size-3" />,
+			label: 'Active',
+			className: 'text-positive',
+		}
+	}
+
+	if (validator.isRegisteredActive) {
+		return {
+			icon: <X className="size-3" />,
+			label: 'Registered but not active',
+			className: 'text-negative',
+		}
+	}
+
+	return {
+		icon: <X className="size-3" />,
+		label: 'Inactive',
+		className: 'text-negative',
+	}
 }
 
 export const Route = createFileRoute('/_layout/validators')({
@@ -95,54 +126,43 @@ function ValidatorsPage() {
 							<DataGrid
 								columns={{ stacked: stackedColumns, tabs: columns }}
 								items={() =>
-									filteredValidators.map((validator, index) => ({
-										cells: [
-											<span
-												key="index"
-												className="tabular-nums text-secondary font-medium"
-											>
-												{index + 1}
-											</span>,
-											<ValidatorName key="name" name={validator.name} />,
-											<Address
-												key="address"
-												address={validator.validatorAddress}
-											/>,
-											<span
-												key="status"
-												className={
-													validator.active ? 'text-positive' : 'text-negative'
-												}
-											>
-												{validator.active ? (
-													<span className="inline-flex items-center gap-1">
-														<Check className="size-3" />
-														Active
-													</span>
+									filteredValidators.map((validator, index) => {
+										const status = validatorStatus(validator)
+										return {
+											cells: [
+												<span
+													key="index"
+													className="tabular-nums text-secondary font-medium"
+												>
+													{index + 1}
+												</span>,
+												<ValidatorName key="name" name={validator.name} />,
+												<Address
+													key="address"
+													address={validator.validatorAddress}
+												/>,
+												<span key="status" className={status.className}>
+													{status.icon}
+													<span className="ml-2">{status.label}</span>
+												</span>,
+												validator.publicKey ? (
+													<Midcut
+														key="pubkey"
+														value={validator.publicKey}
+														prefix="0x"
+													/>
 												) : (
-													<span className="inline-flex items-center gap-1">
-														<X className="size-3" />
-														Inactive
+													<span key="pubkey" className="text-tertiary">
+														—
 													</span>
-												)}
-											</span>,
-											validator.publicKey ? (
-												<Midcut
-													key="pubkey"
-													value={validator.publicKey}
-													prefix="0x"
-												/>
-											) : (
-												<span key="pubkey" className="text-tertiary">
-													—
-												</span>
-											),
-										],
-										link: {
-											href: `/address/${validator.validatorAddress}`,
-											title: `View validator ${validator.validatorAddress}`,
-										},
-									}))
+												),
+											],
+											link: {
+												href: `/address/${validator.validatorAddress}`,
+												title: `View validator ${validator.validatorAddress}`,
+											},
+										}
+									})
 								}
 								totalItems={filteredValidators.length}
 								page={1}
