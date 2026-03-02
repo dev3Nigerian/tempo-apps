@@ -20,6 +20,8 @@ import {
 	fetchAddressTransferRowsByTxHashes,
 	fetchAddressTransferEmittedHashes,
 	fetchAddressTransferHashes,
+	fetchTip20TokenTxCount,
+	fetchTip20TokenTxHashes,
 	type SortDirection,
 } from '#lib/server/tempo-queries'
 import { zAddress } from '#lib/zod'
@@ -147,6 +149,274 @@ const RequestParametersSchema = z.object({
 	sources: z.optional(z.string()),
 })
 
+type HashEntry = {
+	hash: Hex.Hex
+	block_num: bigint
+	from?: string
+	to?: string | null
+	value?: bigint
+}
+
+/**
+ * Shared enrichment: given a page of tx hashes, fetch details from receipts,
+ * txs, logs, and transfers tables, then build EnrichedTransaction[].
+ */
+async function enrichHashEntries(
+	finalHashes: HashEntry[],
+	address: Address.Address,
+	chainId: number,
+	config: ReturnType<typeof getWagmiConfig>,
+): Promise<EnrichedTransaction[]> {
+	const finalHashValues = finalHashes.map((entry) => entry.hash)
+	const [receiptRows, txRows, logRows, transferRows] = await Promise.all([
+		fetchAddressReceiptRowsByHashes(chainId, finalHashValues),
+		fetchAddressHistoryTxDetailsByHashes(chainId, finalHashValues),
+		fetchAddressLogRowsByTxHashes(chainId, finalHashValues),
+		fetchAddressTransferRowsByTxHashes(chainId, finalHashValues),
+	])
+
+	const receiptMap = new Map(
+		receiptRows.map((row) => [row.tx_hash, row] as const),
+	)
+	const txMap = new Map(txRows.map((row) => [row.hash, row] as const))
+	const logsByHash = new Map<Hex.Hex, Log[]>()
+
+	for (const row of logRows) {
+		const topics = [row.topic0, row.topic1, row.topic2, row.topic3].filter(
+			(topic): topic is Hex.Hex => Boolean(topic),
+		)
+
+		const log = {
+			address: row.address,
+			data: row.data,
+			topics,
+			blockNumber: row.block_num,
+			logIndex: row.log_idx,
+			transactionHash: row.tx_hash,
+			transactionIndex: row.tx_idx,
+			removed: false,
+		} as unknown as Log
+
+		const txLogs = logsByHash.get(row.tx_hash)
+		if (txLogs) {
+			txLogs.push(log)
+		} else {
+			logsByHash.set(row.tx_hash, [log])
+		}
+	}
+
+	// Supplement logs with Transfer events from the transfer table.
+	const logIndicesByHash = new Map<Hex.Hex, Set<number>>()
+	for (const row of logRows) {
+		let indices = logIndicesByHash.get(row.tx_hash)
+		if (!indices) {
+			indices = new Set()
+			logIndicesByHash.set(row.tx_hash, indices)
+		}
+		indices.add(row.log_idx)
+	}
+
+	for (const row of transferRows) {
+		if (logIndicesByHash.get(row.tx_hash)?.has(row.log_idx)) continue
+
+		const log = {
+			address: row.address,
+			data: toUint256Data(row.tokens),
+			topics: [
+				TRANSFER_EVENT_TOPIC0,
+				addressToTopic(row.from),
+				addressToTopic(row.to),
+			],
+			blockNumber: row.block_num,
+			logIndex: row.log_idx,
+			transactionHash: row.tx_hash,
+			transactionIndex: 0,
+			removed: false,
+		} as unknown as Log
+
+		const txLogs = logsByHash.get(row.tx_hash)
+		if (txLogs) {
+			txLogs.push(log)
+		} else {
+			logsByHash.set(row.tx_hash, [log])
+		}
+	}
+
+	const allLogs: Log[] = []
+	for (const txLogs of logsByHash.values()) {
+		allLogs.push(...txLogs)
+	}
+
+	const events = (() => {
+		try {
+			return parseEventLogs({ abi, logs: allLogs })
+		} catch (error) {
+			console.error('[history] failed to parse logs for metadata:', error)
+			return []
+		}
+	})()
+	const tokenAddresses = new Set<Address.Address>()
+	for (const event of events) {
+		if (isTip20Address(event.address)) {
+			tokenAddresses.add(event.address)
+		}
+	}
+
+	const tokenMetadataEntries = await Promise.all(
+		[...tokenAddresses].map(async (token) => {
+			try {
+				const metadata = await Actions.token.getMetadata(config as Config, {
+					token,
+				})
+				return [token.toLowerCase(), metadata] as const
+			} catch {
+				return [token.toLowerCase(), undefined] as const
+			}
+		}),
+	)
+	const tokenMetadataMap = new Map<string, Metadata | undefined>(
+		tokenMetadataEntries,
+	)
+
+	const getTokenMetadata = (addr: Address.Address) =>
+		tokenMetadataMap.get(addr.toLowerCase())
+
+	const transactions: EnrichedTransaction[] = []
+
+	for (const hashEntry of finalHashes) {
+		const receipt = receiptMap.get(hashEntry.hash)
+		const tx = txMap.get(hashEntry.hash)
+		const txLogs = logsByHash.get(hashEntry.hash) ?? []
+
+		const fromSource = tx?.from ?? hashEntry.from ?? receipt?.from ?? address
+		const toSource = tx?.to ?? hashEntry.to ?? receipt?.to ?? null
+		const valueSource = tx?.value ?? hashEntry.value ?? 0n
+		const blockNumberSource =
+			receipt?.block_num ?? tx?.block_num ?? hashEntry.block_num
+		const timestampSource = receipt?.block_timestamp ?? tx?.block_timestamp ?? 0
+		const status = toHistoryStatus(receipt?.status)
+
+		const receiptForKnownEvents = {
+			from: (receipt?.from ?? fromSource) as Address.Address,
+			to: toSource as Address.Address | null,
+			status,
+			logs: txLogs,
+		} as unknown as TransactionReceipt
+
+		const transactionForKnownEvents = tx
+			? {
+					to: tx.to as Address.Address | null,
+					input: tx.input,
+					data: tx.input,
+					calls: Array.isArray(tx.calls) ? (tx.calls as never) : undefined,
+				}
+			: undefined
+
+		const knownEvents = (() => {
+			try {
+				return parseKnownEvents(receiptForKnownEvents, {
+					transaction: transactionForKnownEvents as never,
+					getTokenMetadata,
+				})
+			} catch (error) {
+				console.error(
+					`[history] failed to parse known events for ${hashEntry.hash}:`,
+					error,
+				)
+				return []
+			}
+		})()
+
+		transactions.push({
+			hash: hashEntry.hash,
+			blockNumber: toHexQuantity(blockNumberSource),
+			timestamp: toFiniteTimestamp(timestampSource),
+			from: Address.checksum(fromSource as Address.Address),
+			to: toSource ? Address.checksum(toSource as Address.Address) : null,
+			value: toHexQuantity(valueSource),
+			status,
+			gasUsed: toHexQuantity(receipt?.gas_used),
+			effectiveGasPrice: toHexQuantity(receipt?.effective_gas_price),
+			knownEvents: serializeBigInts(knownEvents),
+		})
+	}
+
+	return transactions
+}
+
+/**
+ * TIP-20 fast path: pagination is pushed to TIDX via GROUP BY + OFFSET/LIMIT
+ * and count uses a direct aggregate (no subqueries).
+ *
+ * DB queries: 1 (hashes) + 1 (count) + 4 (enrichment) = 6 total
+ * vs generic: 3 (hashes) + up to 3 (counts) + 4 (enrichment) = 7–10 total
+ */
+async function fetchTip20History(params: {
+	address: Address.Address
+	chainId: number
+	sortDirection: SortDirection
+	offset: number
+	limit: number
+	config: ReturnType<typeof getWagmiConfig>
+}): Promise<HistoryResponse> {
+	const { address, chainId, sortDirection, offset, limit, config } = params
+
+	// Fetch one extra row to determine hasMore, and count in parallel
+	const [pageRows, totalCount] = await Promise.all([
+		fetchTip20TokenTxHashes({
+			address,
+			chainId,
+			sortDirection,
+			limit: limit + 1,
+			offset,
+		}),
+		fetchTip20TokenTxCount({
+			address,
+			chainId,
+			countCap: HISTORY_COUNT_MAX,
+		}).catch(() => 0),
+	])
+
+	const hasMore = pageRows.length > limit
+	const finalRows = hasMore ? pageRows.slice(0, limit) : pageRows
+	const capped = totalCount >= HISTORY_COUNT_MAX
+	const total = Math.min(totalCount, HISTORY_COUNT_MAX)
+
+	if (finalRows.length === 0) {
+		return {
+			transactions: [],
+			total,
+			offset,
+			limit,
+			hasMore: false,
+			countCapped: capped,
+			error: null,
+		}
+	}
+
+	const finalHashes: HashEntry[] = finalRows.map((row) => ({
+		hash: row.tx_hash,
+		block_num: row.block_num,
+	}))
+
+	const transactions = await enrichHashEntries(
+		finalHashes,
+		address,
+		chainId,
+		config,
+	)
+
+	return {
+		transactions,
+		total,
+		offset,
+		limit,
+		hasMore,
+		countCapped: capped,
+		error: null,
+	}
+}
+
 export const Route = createFileRoute('/api/address/history/$address')({
 	server: {
 		handlers: {
@@ -208,6 +478,19 @@ export const Route = createFileRoute('/api/address/history/$address')({
 					const includeReceived = include === 'all' || include === 'received'
 					const sources = parseSources(searchParams.sources)
 
+					// TIP-20 fast path: single query instead of 3-source fan-out
+					if (isTip20Address(address)) {
+						const result = await fetchTip20History({
+							address,
+							chainId,
+							sortDirection,
+							offset,
+							limit,
+							config,
+						})
+						return Response.json(result)
+					}
+
 					const fetchSize = limit + 1
 
 					const bufferSize = Math.min(
@@ -266,13 +549,6 @@ export const Route = createFileRoute('/api/address/history/$address')({
 								: Promise.resolve(emptyTransfer),
 						])
 
-					type HashEntry = {
-						hash: Hex.Hex
-						block_num: bigint
-						from?: string
-						to?: string | null
-						value?: bigint
-					}
 					const allHashes = new Map<Hex.Hex, HashEntry>()
 
 					for (const row of directResult)
@@ -348,196 +624,12 @@ export const Route = createFileRoute('/api/address/history/$address')({
 						} satisfies HistoryResponse)
 					}
 
-					const finalHashValues = finalHashes.map((entry) => entry.hash)
-					const [receiptRows, txRows, logRows, transferRows] =
-						await Promise.all([
-							fetchAddressReceiptRowsByHashes(chainId, finalHashValues),
-							fetchAddressHistoryTxDetailsByHashes(chainId, finalHashValues),
-							fetchAddressLogRowsByTxHashes(chainId, finalHashValues),
-							fetchAddressTransferRowsByTxHashes(chainId, finalHashValues),
-						])
-
-					const receiptMap = new Map(
-						receiptRows.map((row) => [row.tx_hash, row] as const),
+					const transactions = await enrichHashEntries(
+						finalHashes,
+						address,
+						chainId,
+						config,
 					)
-					const txMap = new Map(txRows.map((row) => [row.hash, row] as const))
-					const logsByHash = new Map<Hex.Hex, Log[]>()
-
-					for (const row of logRows) {
-						const topics = [
-							row.topic0,
-							row.topic1,
-							row.topic2,
-							row.topic3,
-						].filter((topic): topic is Hex.Hex => Boolean(topic))
-
-						const log = {
-							address: row.address,
-							data: row.data,
-							topics,
-							blockNumber: row.block_num,
-							logIndex: row.log_idx,
-							transactionHash: row.tx_hash,
-							transactionIndex: row.tx_idx,
-							removed: false,
-						} as unknown as Log
-
-						const txLogs = logsByHash.get(row.tx_hash)
-						if (txLogs) {
-							txLogs.push(log)
-						} else {
-							logsByHash.set(row.tx_hash, [log])
-						}
-					}
-
-					// Supplement logs with Transfer events from the transfer table.
-					// The logs table may not have all event types indexed, so merge
-					// transfer rows to ensure Transfer events are always present.
-					const logIndicesByHash = new Map<Hex.Hex, Set<number>>()
-					for (const row of logRows) {
-						let indices = logIndicesByHash.get(row.tx_hash)
-						if (!indices) {
-							indices = new Set()
-							logIndicesByHash.set(row.tx_hash, indices)
-						}
-						indices.add(row.log_idx)
-					}
-
-					for (const row of transferRows) {
-						// Skip if the logs table already has this exact log entry
-						if (logIndicesByHash.get(row.tx_hash)?.has(row.log_idx)) continue
-
-						const log = {
-							address: row.address,
-							data: toUint256Data(row.tokens),
-							topics: [
-								TRANSFER_EVENT_TOPIC0,
-								addressToTopic(row.from),
-								addressToTopic(row.to),
-							],
-							blockNumber: row.block_num,
-							logIndex: row.log_idx,
-							transactionHash: row.tx_hash,
-							transactionIndex: 0,
-							removed: false,
-						} as unknown as Log
-
-						const txLogs = logsByHash.get(row.tx_hash)
-						if (txLogs) {
-							txLogs.push(log)
-						} else {
-							logsByHash.set(row.tx_hash, [log])
-						}
-					}
-
-					const allLogs: Log[] = []
-					for (const txLogs of logsByHash.values()) {
-						allLogs.push(...txLogs)
-					}
-
-					const events = (() => {
-						try {
-							return parseEventLogs({ abi, logs: allLogs })
-						} catch (error) {
-							console.error(
-								'[history] failed to parse logs for metadata:',
-								error,
-							)
-							return []
-						}
-					})()
-					const tokenAddresses = new Set<Address.Address>()
-					for (const event of events) {
-						if (isTip20Address(event.address)) {
-							tokenAddresses.add(event.address)
-						}
-					}
-
-					const tokenMetadataEntries = await Promise.all(
-						[...tokenAddresses].map(async (token) => {
-							try {
-								const metadata = await Actions.token.getMetadata(
-									config as Config,
-									{ token },
-								)
-								return [token.toLowerCase(), metadata] as const
-							} catch {
-								return [token.toLowerCase(), undefined] as const
-							}
-						}),
-					)
-					const tokenMetadataMap = new Map<string, Metadata | undefined>(
-						tokenMetadataEntries,
-					)
-
-					const getTokenMetadata = (addr: Address.Address) =>
-						tokenMetadataMap.get(addr.toLowerCase())
-
-					const transactions: EnrichedTransaction[] = []
-
-					for (const hashEntry of finalHashes) {
-						const receipt = receiptMap.get(hashEntry.hash)
-						const tx = txMap.get(hashEntry.hash)
-						const txLogs = logsByHash.get(hashEntry.hash) ?? []
-
-						const fromSource =
-							tx?.from ?? hashEntry.from ?? receipt?.from ?? address
-						const toSource = tx?.to ?? hashEntry.to ?? receipt?.to ?? null
-						const valueSource = tx?.value ?? hashEntry.value ?? 0n
-						const blockNumberSource =
-							receipt?.block_num ?? tx?.block_num ?? hashEntry.block_num
-						const timestampSource =
-							receipt?.block_timestamp ?? tx?.block_timestamp ?? 0
-						const status = toHistoryStatus(receipt?.status)
-
-						const receiptForKnownEvents = {
-							from: (receipt?.from ?? fromSource) as Address.Address,
-							to: toSource as Address.Address | null,
-							status,
-							logs: txLogs,
-						} as unknown as TransactionReceipt
-
-						const transactionForKnownEvents = tx
-							? {
-									to: tx.to as Address.Address | null,
-									input: tx.input,
-									data: tx.input,
-									calls: Array.isArray(tx.calls)
-										? (tx.calls as never)
-										: undefined,
-								}
-							: undefined
-
-						const knownEvents = (() => {
-							try {
-								return parseKnownEvents(receiptForKnownEvents, {
-									transaction: transactionForKnownEvents as never,
-									getTokenMetadata,
-								})
-							} catch (error) {
-								console.error(
-									`[history] failed to parse known events for ${hashEntry.hash}:`,
-									error,
-								)
-								return []
-							}
-						})()
-
-						transactions.push({
-							hash: hashEntry.hash,
-							blockNumber: toHexQuantity(blockNumberSource),
-							timestamp: toFiniteTimestamp(timestampSource),
-							from: Address.checksum(fromSource as Address.Address),
-							to: toSource
-								? Address.checksum(toSource as Address.Address)
-								: null,
-							value: toHexQuantity(valueSource),
-							status,
-							gasUsed: toHexQuantity(receipt?.gas_used),
-							effectiveGasPrice: toHexQuantity(receipt?.effective_gas_price),
-							knownEvents: serializeBigInts(knownEvents),
-						})
-					}
 
 					return Response.json({
 						transactions,

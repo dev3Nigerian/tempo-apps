@@ -3,9 +3,13 @@ import * as OxHash from 'ox/Hash'
 import * as OxHex from 'ox/Hex'
 import { decodeAbiParameters, zeroAddress } from 'viem'
 import * as ABIS from '#lib/abis'
-import { tempoQueryBuilder } from '#lib/server/tempo-queries-provider'
+import {
+	tempoFastLookupQueryBuilder,
+	tempoQueryBuilder,
+} from '#lib/server/tempo-queries-provider'
 
 const QB = tempoQueryBuilder
+const CH = tempoFastLookupQueryBuilder
 
 const TRANSFER_SIGNATURE =
 	'event Transfer(address indexed from, address indexed to, uint256 tokens)'
@@ -426,6 +430,56 @@ export async function fetchAddressTransferEmittedHashes(params: {
 		.orderBy('tx_hash', params.sortDirection)
 		.limit(params.limit)
 		.execute()
+}
+
+/**
+ * TIP-20 optimised: fetch a page of distinct tx hashes for a token.
+ * Uses DISTINCT + OFFSET/LIMIT so pagination happens in TIDX, not in-memory.
+ */
+export async function fetchTip20TokenTxHashes(params: {
+	address: Address.Address
+	chainId: number
+	sortDirection: SortDirection
+	limit: number
+	offset: number
+}): Promise<TransferHashRow[]> {
+	return QB(params.chainId)
+		.withSignatures([TRANSFER_SIGNATURE])
+		.selectFrom('transfer')
+		.select(['tx_hash', 'block_num'])
+		.distinct()
+		.where('address', '=', params.address)
+		.orderBy('block_num', params.sortDirection)
+		.orderBy('tx_hash', params.sortDirection)
+		.limit(params.limit)
+		.offset(params.offset)
+		.execute()
+}
+
+/**
+ * TIP-20 optimised: count distinct tx hashes for a token.
+ * Uses the ClickHouse engine (supports subqueries) with a capped LIMIT
+ * to avoid timeouts on tokens with very high transfer volume.
+ */
+export async function fetchTip20TokenTxCount(params: {
+	address: Address.Address
+	chainId: number
+	countCap: number
+}): Promise<number> {
+	const qb = CH(params.chainId)
+	const subquery = qb
+		.withSignatures([TRANSFER_SIGNATURE])
+		.selectFrom('transfer')
+		.select('tx_hash')
+		.distinct()
+		.where('address', '=', params.address)
+
+	const result = await qb
+		.selectFrom(subquery.limit(params.countCap).as('subquery'))
+		.select((eb) => eb.fn.count('tx_hash').as('count'))
+		.executeTakeFirst()
+
+	return Number(result?.count ?? 0)
 }
 
 export async function fetchAddressDirectTxCount(
