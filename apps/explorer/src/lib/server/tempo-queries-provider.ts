@@ -1,30 +1,39 @@
 import { QB, Tidx } from 'tidx.ts'
 
-const tidx = Tidx.create({
-	basicAuth: process.env.TIDX_BASIC_AUTH,
-	baseUrl: 'https://tidx.tempo.xyz',
-})
+let _tidx: Tidx.create.ReturnValue | undefined
 
-tidx.on('response', (res) => {
-	if (!res.ok)
-		res
-			.clone()
-			.text()
-			.then((body) =>
-				console.error(
-					`[tidx:${res.status}]`,
-					decodeURIComponent(res.url),
-					body,
-				),
-			)
-})
+function getTidx() {
+	if (_tidx) return _tidx
+
+	_tidx = Tidx.create({
+		basicAuth: process.env.TIDX_BASIC_AUTH,
+		baseUrl: 'https://tidx.tempo.xyz',
+	})
+
+	_tidx.on('response', (res) => {
+		if (!res.ok)
+			res
+				.clone()
+				.text()
+				.then((body) =>
+					console.error(
+						`[tidx:${res.status}]`,
+						decodeURIComponent(res.url),
+						body,
+						`(auth=${process.env.TIDX_BASIC_AUTH ? 'set' : 'missing'})`,
+					),
+				)
+	})
+
+	return _tidx
+}
 
 export function tempoQueryBuilder(chainId: number) {
-	return QB.from({ ...tidx, chainId })
+	return QB.from({ ...getTidx(), chainId })
 }
 
 export function tempoFastLookupQueryBuilder(chainId: number) {
-	return QB.from({ ...tidx, chainId, engine: 'clickhouse' })
+	return QB.from({ ...getTidx(), chainId, engine: 'clickhouse' })
 }
 
-export { tidx }
+export { getTidx as tidx }
