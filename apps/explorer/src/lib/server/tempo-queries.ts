@@ -485,7 +485,7 @@ export async function fetchTip20TokenTxCount(params: {
 export async function fetchAddressDirectTxCount(
 	params: AddressDirectionParams & { countCap: number },
 ): Promise<number> {
-	const qb = QB(params.chainId)
+	const qb = CH(params.chainId)
 	let subquery = qb.selectFrom('txs').select((eb) => eb.lit(1).as('x'))
 
 	subquery = applyAddressDirectionFilter(subquery, params)
@@ -501,7 +501,7 @@ export async function fetchAddressDirectTxCount(
 export async function fetchAddressTransferDistinctCount(
 	params: AddressDirectionParams & { countCap: number },
 ): Promise<number> {
-	const qb = QB(params.chainId)
+	const qb = CH(params.chainId)
 	let subquery = qb
 		.withSignatures([TRANSFER_SIGNATURE])
 		.selectFrom('transfer')
@@ -523,7 +523,7 @@ export async function fetchAddressTransferEmittedDistinctCount(params: {
 	chainId: number
 	countCap: number
 }): Promise<number> {
-	const qb = QB(params.chainId)
+	const qb = CH(params.chainId)
 	const subquery = qb
 		.withSignatures([TRANSFER_SIGNATURE])
 		.selectFrom('transfer')

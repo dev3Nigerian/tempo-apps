@@ -228,6 +228,9 @@ export const Route = createFileRoute('/_layout/address/$address')({
 			const offset = (page - 1) * limit
 			const account =
 				a && Address.validate(a) ? (a as Address.Address) : undefined
+			const historySources: HistorySources[] = Tip20.isTip20Address(address)
+				? ['txs', 'transfers', 'emitted']
+				: ['txs', 'transfers']
 
 			// Tab-aware loading: only fetch data needed for the active tab
 			const isTransactionsTab = tab === 'transactions'
@@ -264,7 +267,7 @@ export const Route = createFileRoute('/_layout/address/$address')({
 			)
 
 			// Only block on transactions if transactions tab is active.
-			// Include all history sources so token pages can be fully rendered from SSR.
+			// Include emitted source only for TIP-20 addresses.
 			const transactionsPromise = isTransactionsTab
 				? timeout(
 						context.queryClient
@@ -274,7 +277,7 @@ export const Route = createFileRoute('/_layout/address/$address')({
 									page,
 									limit,
 									offset,
-									sources: ['txs', 'transfers', 'emitted'],
+									sources: historySources,
 								}),
 							)
 							.catch((error) => {
@@ -528,11 +531,20 @@ function RouteComponent() {
 	React.useEffect(() => {
 		if (prefetchedRef.current === address) return
 		prefetchedRef.current = address
+		const prefetchHistorySources: HistorySources[] = isTip20
+			? ['txs', 'transfers', 'emitted']
+			: ['txs', 'transfers']
 
 		const timer = setTimeout(() => {
 			if (tab !== 'transactions') {
 				queryClient.prefetchQuery(
-					historyQueryOptions({ address, page: 1, limit, offset: 0 }),
+					historyQueryOptions({
+						address,
+						page: 1,
+						limit,
+						offset: 0,
+						sources: prefetchHistorySources,
+					}),
 				)
 			}
 			if (tab !== 'holdings' && !isToken) {
@@ -541,7 +553,7 @@ function RouteComponent() {
 		}, 2_000)
 
 		return () => clearTimeout(timer)
-	}, [address, tab, limit, queryClient, isToken])
+	}, [address, tab, limit, queryClient, isToken, isTip20])
 
 	return (
 		<div
@@ -738,8 +750,9 @@ function SectionsWrapper(props: {
 	// Only auto-refresh on page 1 when transactions tab is active and live=true
 	const shouldAutoRefresh = page === 1 && isTransactionsTabActive && live
 
-	// Fetch enriched transaction history server-side for all addresses, including tokens.
-	const historySources: HistorySources[] = ['txs', 'transfers', 'emitted']
+	const historySources: HistorySources[] = Tip20.isTip20Address(address)
+		? ['txs', 'transfers', 'emitted']
+		: ['txs', 'transfers']
 
 	const {
 		data: historyQueryData,

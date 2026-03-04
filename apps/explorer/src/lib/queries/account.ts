@@ -87,7 +87,7 @@ export function historyQueryOptions(params: {
 	address: Address.Address
 	sources?: HistorySources[] | undefined
 }) {
-	const sources = params.sources?.join(',') ?? 'txs,transfers,emitted'
+	const sources = params.sources?.join(',') ?? 'txs,transfers'
 	const searchParams = new URLSearchParams({
 		include: params?.include ?? 'all',
 		limit: params.limit.toString(),
