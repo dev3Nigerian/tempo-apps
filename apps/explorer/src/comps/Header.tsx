@@ -9,11 +9,35 @@ import { ExploreInput } from '#comps/ExploreInput'
 import { useAnimatedBlockNumber, useLiveBlockNumber } from '#lib/block-number'
 import { cx } from '#lib/css'
 import { isTestnet } from '#lib/env'
-import { useIsMounted } from '#lib/hooks'
+import MenuIcon from '~icons/lucide/menu'
 import SquareSquare from '~icons/lucide/square-square'
+import XIcon from '~icons/lucide/x'
+
+const LANDING_NAV_LINKS: Array<{ label: string; to: string }> = [
+	{ label: 'About', to: 'https://tempo.xyz' },
+	{ label: 'Docs', to: 'https://docs.tempo.xyz' },
+	{ label: 'GitHub', to: 'https://github.com/tempoxyz' },
+	{
+		label: 'Feedback',
+		to: 'https://github.com/tempoxyz/tempo-apps/discussions/categories/explorer',
+	},
+]
 
 export function Header(props: Header.Props) {
 	const { initialBlockNumber } = props
+	const router = useRouter()
+	const resolvedPathname = useRouterState({
+		select: (state) =>
+			state.resolvedLocation?.pathname ?? state.location.pathname,
+	})
+	const isLanding = resolvedPathname === '/'
+	const [isMenuOpen, setIsMenuOpen] = React.useState(false)
+
+	React.useEffect(() => {
+		return router.subscribe('onResolved', ({ hrefChanged }) => {
+			if (hrefChanged) setIsMenuOpen(false)
+		})
+	}, [router])
 
 	return (
 		<header className="@container relative z-1">
@@ -23,11 +47,19 @@ export function Header(props: Header.Props) {
 						<Header.TempoWordmark />
 					</Link>
 				</div>
+				{isLanding && <Header.LandingNavDesktop />}
 				<Header.Search />
 				<div className="relative z-1 print:hidden flex items-center gap-[8px]">
 					<Header.BlockNumber initial={initialBlockNumber} />
+					<Header.LandingNavToggle
+						open={isMenuOpen}
+						onClick={() => setIsMenuOpen((prev) => !prev)}
+					/>
 				</div>
 			</div>
+			{isMenuOpen && (
+				<Header.LandingNavMobile onNavigate={() => setIsMenuOpen(false)} />
+			)}
 			<Header.Search compact />
 		</header>
 	)
@@ -43,18 +75,11 @@ export namespace Header {
 		const router = useRouter()
 		const navigate = useNavigate()
 		const [inputValue, setInputValue] = React.useState('')
-
-		const [delayedNavigating, setDelayedNavigating] = React.useState(false)
-		const { resolvedPathname, isNavigating } = useRouterState({
-			select: (state) => ({
-				resolvedPathname:
-					state.resolvedLocation?.pathname ?? state.location.pathname,
-				isNavigating: state.status === 'pending',
-			}),
+		const resolvedPathname = useRouterState({
+			select: (state) =>
+				state.resolvedLocation?.pathname ?? state.location.pathname,
 		})
 		const showSearch = resolvedPathname !== '/'
-
-		const isMounted = useIsMounted()
 
 		React.useEffect(() => {
 			return router.subscribe('onResolved', ({ hrefChanged }) => {
@@ -62,23 +87,12 @@ export namespace Header {
 			})
 		}, [router])
 
-		// delay disabling the input to avoid blinking on fast navigations
-		React.useEffect(() => {
-			if (!isNavigating) {
-				setDelayedNavigating(false)
-				return
-			}
-			const timer = setTimeout(() => setDelayedNavigating(true), 100)
-			return () => clearTimeout(timer)
-		}, [isNavigating])
-
 		if (!showSearch) return null
 
 		const exploreInput = (
 			<ExploreInput
 				value={inputValue}
 				onChange={setInputValue}
-				disabled={isMounted && delayedNavigating}
 				onActivate={({ value, type }) => {
 					if (type === 'block') {
 						navigate({ to: '/block/$id', params: { id: value } })
@@ -110,7 +124,6 @@ export namespace Header {
 						wide
 						value={inputValue}
 						onChange={setInputValue}
-						disabled={isMounted && delayedNavigating}
 						onActivate={({ value, type }) => {
 							if (type === 'block') {
 								navigate({ to: '/block/$id', params: { id: value } })
@@ -146,7 +159,6 @@ export namespace Header {
 						wide
 						value={inputValue}
 						onChange={setInputValue}
-						disabled={isMounted && delayedNavigating}
 						onActivate={({ value, type }) => {
 							if (type === 'block') {
 								navigate({ to: '/block/$id', params: { id: value } })
@@ -172,6 +184,87 @@ export namespace Header {
 				</div>
 			</>
 		)
+	}
+
+	export function LandingNavDesktop() {
+		return (
+			<nav
+				className="absolute left-1/2 -translate-x-1/2 z-1 hidden @min-[900px]:flex items-center gap-[40px] text-[15px] select-none print:hidden"
+				aria-label="Landing navigation"
+			>
+				{LANDING_NAV_LINKS.map((link) => (
+					<a
+						key={link.label}
+						href={link.to}
+						target="_blank"
+						rel="noopener noreferrer"
+						className="press-down text-primary"
+					>
+						{link.label}
+					</a>
+				))}
+			</nav>
+		)
+	}
+
+	export function LandingNavToggle(props: LandingNavToggle.Props) {
+		const { open, onClick } = props
+
+		return (
+			<button
+				type="button"
+				onClick={onClick}
+				aria-label={open ? 'Close navigation menu' : 'Open navigation menu'}
+				aria-expanded={open}
+				className="@min-[900px]:hidden rounded-[10px]! border border-base-border bg-base-background/90 text-primary size-[34px] grid place-items-center cursor-pointer press-down transition-colors hover:bg-surface"
+			>
+				{open ? (
+					<XIcon className="size-[16px]" />
+				) : (
+					<MenuIcon className="size-[16px]" />
+				)}
+			</button>
+		)
+	}
+
+	export namespace LandingNavToggle {
+		export interface Props {
+			open: boolean
+			onClick: () => void
+		}
+	}
+
+	export function LandingNavMobile(props: LandingNavMobile.Props) {
+		const { onNavigate } = props
+
+		return (
+			<nav
+				className="@min-[900px]:hidden absolute top-full left-0 right-0 z-20 bg-base-background/96 backdrop-blur-[4px] shadow-[0_20px_36px_rgba(0,0,0,0.32)] print:hidden"
+				aria-label="Landing navigation"
+			>
+				<ul className="px-[24px] pt-[16px] pb-[20px] flex flex-col gap-[2px] text-[15px] select-none">
+					{LANDING_NAV_LINKS.map((link) => (
+						<li key={link.label}>
+							<a
+								href={link.to}
+								target="_blank"
+								rel="noopener noreferrer"
+								onClick={onNavigate}
+								className="inline-flex py-[10px] text-primary press-down"
+							>
+								{link.label}
+							</a>
+						</li>
+					))}
+				</ul>
+			</nav>
+		)
+	}
+
+	export namespace LandingNavMobile {
+		export interface Props {
+			onNavigate: () => void
+		}
 	}
 
 	export function BlockNumber(props: BlockNumber.Props) {
