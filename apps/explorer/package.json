@@ -4,7 +4,8 @@
 	"type": "module",
 	"imports": {
 		"#*": "./src/*",
-		"#wrangler.json": "./wrangler.jsonc"
+		"#package.json": "./package.json",
+		"#wrangler.json": "./wrangler.json"
 	},
 	"scripts": {
 		"postinstall": "pnpm gen:types",
@@ -21,8 +22,11 @@
 		"check:biome": "biome check --write --unsafe",
 		"check:types": "tsgo --project tsconfig.json --noEmit",
 		"check:types:test": "tsc --project tsconfig.test.json --noEmit",
-		"predeploy": "pnpm build",
-		"deploy": "wrangler deploy",
+		"predeploy": "bash scripts/build.sh",
+		"deploy": "bash scripts/deploy.sh",
+		"deploy:devnet": "pnpm deploy --env devnet",
+		"deploy:testnet": "pnpm deploy --env testnet",
+		"deploy:mainnet": "pnpm deploy --env mainnet",
 		"gen:tokens-index": "pnpm node --env-file-if-exists=.env scripts/generate-tokens-index.ts",
 		"gen:types": "test -f .env || cp .env.example .env; CLOUDFLARE_ENV='mainnet' wrangler types",
 		"preview": "vite preview --mode='preview'",
@@ -69,16 +73,15 @@
 		"@tanstack/react-devtools": "catalog:",
 		"@tanstack/react-query-devtools": "catalog:",
 		"@tanstack/react-router-devtools": "catalog:",
-		"@total-typescript/ts-reset": "^0.6.1",
+		"@total-typescript/ts-reset": "catalog:",
 		"@types/animejs": "catalog:",
 		"@types/node": "catalog:",
 		"@types/react": "catalog:",
 		"@types/react-dom": "catalog:",
 		"@vitejs/plugin-react": "catalog:",
 		"eruda": "catalog:",
-		"jsonc-parser": "catalog:",
 		"rollup-plugin-visualizer": "catalog:",
-		"shiki": "^3.23.0",
+		"shiki": "catalog:",
 		"sonda": "catalog:",
 		"tailwind-merge": "catalog:",
 		"tw-animate-css": "catalog:",
@@ -86,6 +89,7 @@
 		"unplugin-icons": "catalog:",
 		"vite": "catalog:",
 		"vite-plugin-devtools-json": "^1.0.0",
+		"vite-tsconfig-paths": "catalog:",
 		"vitest": "catalog:",
 		"wrangler": "catalog:"
 	}
